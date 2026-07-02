@@ -15,9 +15,12 @@ from app.models import (
     ActionStatus,
     AppState,
     CrawlRequest,
+    ExecutionMetrics,
+    ExecutionRun,
     GenerateRequest,
     MutationRequest,
     RunRequest,
+    TestScenario,
 )
 from app.rag.chunking import chunk_pages
 from app.rag.crawler import DocsCrawler
@@ -36,6 +39,7 @@ retriever = HybridRetriever()
 if state.chunks:
     retriever.build(state.chunks)
 reporter = Reporter()
+running_tasks: set[asyncio.Task] = set()
 
 app = FastAPI(
     title="4ga Boards 智能测试场景生成与执行平台",
@@ -65,6 +69,7 @@ def health() -> dict:
         "features": len(state.features),
         "scenarios": len(state.scenarios),
         "runs": len(state.runs),
+        "llm_provider": settings.llm_provider,
         "llm_model": settings.openai_model,
         "target_app_url": settings.target_app_url,
     }
@@ -145,11 +150,19 @@ def mutate_scenario(scenario_id: str, request: MutationRequest) -> dict:
         raise HTTPException(status_code=404, detail="Scenario not found")
     mutations = ScenarioMutator().mutate(scenario, request)
     existing_ids = {item.id for item in state.scenarios}
+    added_count = 0
     for item in mutations:
         if item.id not in existing_ids:
             state.scenarios.append(item)
+            existing_ids.add(item.id)
+            added_count += 1
     save()
-    return {"mutations": mutations, "scenario_count": len(state.scenarios)}
+    return {
+        "mutations": mutations,
+        "added_count": added_count,
+        "existing_count": len(mutations) - added_count,
+        "scenario_count": len(state.scenarios),
+    }
 
 
 @app.post("/api/runs")
@@ -163,20 +176,65 @@ async def create_runs(request: RunRequest) -> dict:
     )
     if not selected:
         raise HTTPException(status_code=404, detail="No matching scenarios")
-    agent = BrowserAgent()
     runs = []
     for scenario in selected:
         for _ in range(request.repeat):
-            run = await agent.execute(
-                scenario,
+            run_id = f"run_{uuid4().hex[:12]}"
+            run = ExecutionRun(
+                id=run_id,
+                scenario_id=scenario.id,
+                status=ActionStatus.running,
                 target_url=str(request.target_url or settings.target_app_url),
-                headless=request.headless,
-                viewport=request.viewport,
+                trace=["执行任务已创建，等待浏览器启动"],
+                metrics=ExecutionMetrics(viewport=request.viewport),
             )
             state.runs[run.id] = run
             runs.append(run)
-            save()
+            task = asyncio.create_task(
+                execute_run_task(
+                    run_id,
+                    scenario,
+                    target_url=str(request.target_url or settings.target_app_url),
+                    headless=request.headless,
+                    viewport=request.viewport,
+                )
+            )
+            running_tasks.add(task)
+            task.add_done_callback(running_tasks.discard)
+    save()
     return {"runs": runs}
+
+
+async def execute_run_task(
+    run_id: str,
+    scenario: TestScenario,
+    target_url: str,
+    headless: bool,
+    viewport: str,
+) -> None:
+    agent = BrowserAgent()
+
+    async def persist(run: ExecutionRun) -> None:
+        state.runs[run.id] = run
+        save()
+
+    try:
+        run = await agent.execute(
+            scenario,
+            target_url=target_url,
+            headless=headless,
+            viewport=viewport,
+            run_id=run_id,
+            on_update=persist,
+        )
+        await persist(run)
+    except Exception as exc:
+        run = state.runs.get(run_id)
+        if run:
+            run.status = ActionStatus.failed
+            run.failure_reason = str(exc)
+            run.trace.append(f"执行任务异常: {exc}")
+            await persist(run)
 
 
 @app.get("/api/runs/{run_id}")

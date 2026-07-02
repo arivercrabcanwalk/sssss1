@@ -37,6 +37,105 @@ main {
   min-height: 100vh;
 }
 
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    linear-gradient(135deg, rgba(31, 94, 255, 0.12), rgba(6, 122, 70, 0.08)),
+    #f6f8fb;
+}
+
+.login-panel {
+  width: min(420px, 100%);
+  padding: 28px;
+  border: 1px solid #dce4ef;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 55px rgba(22, 32, 51, 0.12);
+}
+
+.login-mark {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: #eef3ff;
+  color: #1f4eb8;
+}
+
+.login-panel h1 {
+  margin: 18px 0 6px;
+  font-size: 25px;
+}
+
+.login-panel p {
+  margin: 0 0 18px;
+  color: #66758d;
+}
+
+.login-panel label {
+  display: grid;
+  gap: 7px;
+  margin-top: 13px;
+  color: #46556c;
+  font-size: 13px;
+}
+
+.login-panel input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #cbd5e3;
+  border-radius: 7px;
+  padding: 8px 11px;
+  color: #162033;
+  outline: none;
+}
+
+.login-panel input:focus {
+  border-color: #1f5eff;
+  box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.12);
+}
+
+.login-panel > button[type="submit"] {
+  width: 100%;
+  min-height: 42px;
+  margin-top: 18px;
+  border-radius: 7px;
+  background: #1f5eff;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.login-error {
+  margin-top: 12px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: #fde7e7;
+  color: #9f1c1c;
+}
+
+.account-hints {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.account-hints button,
+.session-chip {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 7px;
+  padding: 7px 10px;
+  background: #eef3ff;
+  color: #1f4eb8;
+  font-size: 13px;
+}
+
 .topbar {
   display: flex;
   align-items: center;
@@ -84,7 +183,8 @@ main {
   box-shadow: 0 1px 2px rgba(31, 94, 255, 0.18);
 }
 
-.top-actions button:last-child {
+.top-actions button[title="刷新"],
+.top-actions button[title="退出登录"] {
   width: 36px;
   padding: 0;
   background: #eef3ff;
@@ -321,6 +421,28 @@ main {
   color: #1f4eb8;
 }
 
+.scenario-actions button.mutate-button {
+  width: auto;
+  padding: 0 9px;
+}
+
+.scenario-actions button.mutate-button span {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mutation-line {
+  margin-top: 9px;
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: #eaf7ef;
+  color: #1f6e32;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .difficulty {
   display: inline-flex;
   margin-top: 7px;
@@ -398,6 +520,13 @@ main {
   color: #b42318;
 }
 
+.run-summary .running,
+.run-summary .pending,
+.timeline-row.running .index,
+.timeline-row.pending .index {
+  color: #1f4eb8;
+}
+
 .verdict {
   margin: 12px 0;
   padding: 10px;
@@ -410,6 +539,22 @@ main {
   display: grid;
   gap: 10px;
   max-height: 480px;
+}
+
+.trace-list {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 12px;
+}
+
+.trace-list span {
+  padding: 8px 10px;
+  border-left: 3px solid #9db9ff;
+  border-radius: 5px;
+  background: #f5f8fc;
+  color: #46556c;
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .timeline-row {

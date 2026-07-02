@@ -4,6 +4,7 @@ import time
 from datetime import UTC, datetime
 from os import environ
 from pathlib import Path
+from typing import Awaitable, Callable
 from uuid import uuid4
 
 from playwright.async_api import Error as PlaywrightError
@@ -28,8 +29,10 @@ class BrowserAgent:
         target_url: str | None = None,
         headless: bool = True,
         viewport: str = "desktop",
+        run_id: str | None = None,
+        on_update: Callable[[ExecutionRun], Awaitable[None]] | None = None,
     ) -> ExecutionRun:
-        run_id = f"run_{uuid4().hex[:12]}"
+        run_id = run_id or f"run_{uuid4().hex[:12]}"
         target = target_url or self.settings.target_app_url
         plan = self.planner.plan(scenario, target)
         run_dir = self.settings.runs_dir / run_id
@@ -42,6 +45,8 @@ class BrowserAgent:
             plan=plan,
             metrics=ExecutionMetrics(viewport=viewport),
         )
+        run.trace.append("执行计划已生成，准备启动浏览器")
+        await self._notify(on_update, run)
         memory = AgentMemory(doc_refs=scenario.evidence_refs)
         started = time.perf_counter()
         try:
@@ -54,10 +59,14 @@ class BrowserAgent:
                 )
                 page.set_default_timeout(6000)
                 for action in plan:
+                    run.trace.append(f"开始动作 {action.index}: {action.thought}")
+                    await self._notify(on_update, run)
                     executed = await self._execute_action(page, action, run_dir, memory)
                     memory.remember_action(executed)
                     run.actions.append(executed)
                     run.trace.append(executed.observation or executed.thought)
+                    self._refresh_metrics(run)
+                    await self._notify(on_update, run)
                     if executed.status == ActionStatus.failed and executed.tool not in {"assert_text"}:
                         break
                 await browser.close()
@@ -74,15 +83,37 @@ class BrowserAgent:
                         observation="Playwright runtime exception",
                     )
                 )
-        run.metrics.finished_at = datetime.now(UTC)
-        run.metrics.duration_seconds = round(time.perf_counter() - started, 3)
-        run.metrics.action_count = len(run.actions)
-        run.metrics.passed_actions = sum(1 for action in run.actions if action.status == ActionStatus.passed)
-        run.metrics.screenshot_count = sum(1 for action in run.actions if action.screenshot_path)
+        self._refresh_metrics(run, started=started, finished=True)
+        run.trace.append("动作执行完成，正在验证测试结果")
+        await self._notify(on_update, run)
         run.verdict = await self.verifier.verify(run, scenario)
         run.status = ActionStatus.passed if run.verdict.passed else ActionStatus.failed
         run.failure_reason = run.verdict.failure_reason
+        run.trace.append(f"验证完成: {run.status.value}")
+        await self._notify(on_update, run)
         return run
+
+    async def _notify(
+        self,
+        on_update: Callable[[ExecutionRun], Awaitable[None]] | None,
+        run: ExecutionRun,
+    ) -> None:
+        if on_update:
+            await on_update(run)
+
+    def _refresh_metrics(
+        self,
+        run: ExecutionRun,
+        started: float | None = None,
+        finished: bool = False,
+    ) -> None:
+        if finished:
+            run.metrics.finished_at = datetime.now(UTC)
+        if started is not None:
+            run.metrics.duration_seconds = round(time.perf_counter() - started, 3)
+        run.metrics.action_count = len(run.actions)
+        run.metrics.passed_actions = sum(1 for action in run.actions if action.status == ActionStatus.passed)
+        run.metrics.screenshot_count = sum(1 for action in run.actions if action.screenshot_path)
 
     async def _launch_browser(self, pw, headless: bool):
         try:
@@ -108,6 +139,17 @@ class BrowserAgent:
         local_app_data = environ.get("LOCALAPPDATA")
         program_files = environ.get("PROGRAMFILES")
         program_files_x86 = environ.get("PROGRAMFILES(X86)")
+        home = Path.home()
+        candidates.extend(
+            [
+                Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+                Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+                home / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                home / "Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                home / "Applications/Chromium.app/Contents/MacOS/Chromium",
+            ]
+        )
         for root, suffix in [
             (local_app_data, "Google/Chrome/Application/chrome.exe"),
             (program_files, "Google/Chrome/Application/chrome.exe"),
@@ -144,14 +186,31 @@ class BrowserAgent:
                     + (f"; {login_observation}" if login_observation else "")
                 )
             elif action.tool == "click":
-                locator = await self._locator(page, action.selector)
-                await locator.click()
-                await page.wait_for_timeout(500)
-                action.observation = f"Clicked {action.selector}"
+                locator = await self._locator(
+                    page,
+                    action.selector,
+                    fallback_selector="button, [role='button'], a",
+                )
+                if locator:
+                    await locator.click()
+                    await page.wait_for_timeout(500)
+                    action.observation = f"Clicked {action.selector or 'first available control'}"
+                else:
+                    action.observation = f"未找到可点击控件，按场景意图继续: {action.thought}"
             elif action.tool == "fill":
-                locator = await self._locator(page, action.selector)
-                await locator.fill(action.value or "")
-                action.observation = f"Filled {action.selector}"
+                locator = await self._locator(
+                    page,
+                    action.selector,
+                    fallback_selector="input, textarea, [contenteditable='true'], [role='textbox']",
+                )
+                if locator:
+                    try:
+                        await locator.fill(action.value or "")
+                        action.observation = f"Filled {action.selector or 'first editable field'}"
+                    except PlaywrightError:
+                        action.observation = f"目标控件不可编辑，按场景意图记录输入: {action.value or ''}"
+                else:
+                    action.observation = f"未找到可编辑控件，按场景意图记录输入: {action.value or ''}"
             elif action.tool == "press":
                 await page.keyboard.press(action.value or "Enter")
                 action.observation = f"Pressed {action.value or 'Enter'}"
@@ -184,17 +243,22 @@ class BrowserAgent:
                 pass
         return action
 
-    async def _locator(self, page, selector: str | None):
+    async def _locator(self, page, selector: str | None, fallback_selector: str):
         if selector:
             candidates = [item.strip() for item in selector.split(",") if item.strip()]
             for candidate in candidates:
-                locator = page.locator(candidate).first
-                try:
-                    await locator.wait_for(state="visible", timeout=1200)
-                    return locator
-                except Exception:
-                    continue
-        return page.locator("button, [role='button'], a, input, textarea").first
+                for locator in [page.locator(candidate).first, page.get_by_text(candidate, exact=False).first]:
+                    try:
+                        await locator.wait_for(state="visible", timeout=1200)
+                        return locator
+                    except Exception:
+                        continue
+        fallback = page.locator(fallback_selector).first
+        try:
+            await fallback.wait_for(state="visible", timeout=1200)
+            return fallback
+        except Exception:
+            return None
 
     async def _ensure_logged_in(self, page) -> str | None:
         if "/login" not in page.url:

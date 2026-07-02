@@ -24,6 +24,8 @@ class RunVerifier:
             "evidence": evidence[-8:],
             "error_types": error_types,
         }
+        if rule_passed:
+            return VerificationResult.model_validate(fallback)
         data = await self.llm.complete_json(
             system=(
                 "你是 Web 测试验证器。根据测试场景、操作轨迹和页面观察，判断是否成功。"

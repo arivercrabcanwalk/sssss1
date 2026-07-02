@@ -23,12 +23,23 @@ export function ScenarioList({
   const visible = selectedFeatureId
     ? scenarios.filter((scenario) => scenario.feature_id === selectedFeatureId)
     : scenarios;
+  const baseCount = visible.filter((scenario) => !scenario.mutated_from).length;
+  const mutationCount = visible.length - baseCount;
+  const mutationLabels: Record<string, string> = {
+    boundary_input: "边界输入",
+    missing_required: "缺失必填",
+    wrong_order: "错误顺序",
+    mobile_layout: "移动布局",
+    duplicate_submit: "重复提交"
+  };
   return (
     <section className="panel scenario-panel">
       <div className="panel-heading">
         <div>
           <h2>测试场景</h2>
-          <p>结构化步骤、预期状态与测试预言</p>
+          <p>
+            结构化步骤、预期状态与测试预言 · 基础 {baseCount} 个 / 变异 {mutationCount} 个
+          </p>
         </div>
         <FlaskConical size={20} />
       </div>
@@ -56,6 +67,7 @@ export function ScenarioList({
                   <Play size={16} />
                 </button>
                 <button
+                  className="mutate-button"
                   title="生成变异测试"
                   disabled={busy}
                   onClick={(event) => {
@@ -64,9 +76,15 @@ export function ScenarioList({
                   }}
                 >
                   <Wand2 size={16} />
+                  <span>变异</span>
                 </button>
               </div>
             </div>
+            {scenario.mutated_from ? (
+              <div className="mutation-line">
+                变异测试 · {mutationLabels[scenario.mutation_type ?? ""] ?? scenario.mutation_type ?? "自定义"}
+              </div>
+            ) : null}
             <ol>
               {scenario.steps.slice(0, 4).map((step) => (
                 <li key={step.index}>

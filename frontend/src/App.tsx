@@ -1,5 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, Database, FileDown, Globe, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import type { FormEvent } from "react";
+import {
+  BarChart3,
+  Database,
+  FileDown,
+  Globe,
+  Loader2,
+  LockKeyhole,
+  LogOut,
+  RefreshCw,
+  Sparkles,
+  UserRound
+} from "lucide-react";
 import { api } from "./api/client";
 import type { ExecutionRun, FeaturePoint, Metrics, TestScenario } from "./api/types";
 import { FeatureList } from "./components/FeatureList";
@@ -12,7 +24,22 @@ type LogItem = {
   text: string;
 };
 
+type Account = {
+  username: string;
+  password: string;
+  role: "普通用户" | "管理员";
+};
+
+const accounts: Account[] = [
+  { username: "user", password: "user123", role: "普通用户" },
+  { username: "admin", password: "admin123", role: "管理员" }
+];
+
 export function App() {
+  const [account, setAccount] = useState<Account | null>(() => {
+    const saved = window.localStorage.getItem("xdrj-account");
+    return accounts.find((item) => item.username === saved) ?? null;
+  });
   const [features, setFeatures] = useState<FeaturePoint[]>([]);
   const [scenarios, setScenarios] = useState<TestScenario[]>([]);
   const [runs, setRuns] = useState<ExecutionRun[]>([]);
@@ -72,8 +99,21 @@ export function App() {
   }
 
   useEffect(() => {
-    refresh().catch(() => undefined);
-  }, []);
+    if (account) {
+      refresh().catch(() => undefined);
+    }
+  }, [account]);
+
+  function updateRun(run: ExecutionRun) {
+    setRuns((items) => {
+      const rest = items.filter((item) => item.id !== run.id);
+      return [run, ...rest];
+    });
+  }
+
+  if (!account) {
+    return <LoginScreen onLogin={setAccount} />;
+  }
 
   return (
     <main>
@@ -83,6 +123,10 @@ export function App() {
           <p>RAG 生成测试场景 · Web Agent 自主执行 · 变异与验证报告</p>
         </div>
         <div className="top-actions">
+          <span className="session-chip">
+            <UserRound size={15} />
+            {account.role}
+          </span>
           <button
             disabled={busy}
             onClick={() =>
@@ -113,7 +157,7 @@ export function App() {
             disabled={busy}
             onClick={() =>
               guarded("生成场景", async () => {
-                log("开始从知识库生成结构化测试场景");
+                log("开始调用 MiniMax 生成结构化测试场景，复杂文档可能需要几分钟");
                 const result = await api.generate();
                 setFeatures(result.features);
                 setScenarios(result.scenarios);
@@ -139,6 +183,18 @@ export function App() {
           </button>
           <button title="刷新" disabled={busy} onClick={() => guarded("刷新", () => refresh(true))}>
             {busy ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+          </button>
+          <button
+            title="退出登录"
+            disabled={busy}
+            onClick={() => {
+              window.localStorage.removeItem("xdrj-account");
+              setAccount(null);
+              setRuns([]);
+              log("已退出登录");
+            }}
+          >
+            <LogOut size={16} />
           </button>
         </div>
       </header>
@@ -179,15 +235,33 @@ export function App() {
           onMutate={(id) =>
             guarded("生成变异", async () => {
               const result = await api.mutate(id);
-              log(`生成 ${result.mutations.length} 个变异场景`);
+              if (result.mutations[0]) {
+                setSelectedScenarioId(result.mutations[0].id);
+              }
+              if (result.added_count > 0) {
+                log(`变异测试已生成：新增 ${result.added_count} 个，已自动选中第一个变异场景`);
+              } else if (result.existing_count > 0) {
+                log(`该场景的 ${result.existing_count} 个变异测试已存在，已自动选中第一个变异场景`);
+              } else {
+                log("当前场景没有可生成的变异测试");
+              }
             })
           }
           onRun={(id, viewport) =>
             guarded("执行测试", async () => {
               log(`开始执行场景 ${id}`);
               const result = await api.run([id], viewport);
-              setRuns((items) => [...result.runs, ...items]);
-              log(`执行完成：${result.runs[0]?.status ?? "unknown"}`);
+              const started = result.runs[0];
+              if (!started) {
+                throw new Error("后端未返回执行任务");
+              }
+              updateRun(started);
+              log(`执行任务已启动：${started.id}`);
+              const finished = await api.subscribeRun(started.id, (run) => {
+                updateRun(run);
+                log(run.trace[run.trace.length - 1] ?? `执行状态：${run.status}`);
+              });
+              log(`执行完成：${finished.status}`);
             })
           }
         />
@@ -240,6 +314,65 @@ export function App() {
           </div>
         </div>
       </section>
+    </main>
+  );
+}
+
+function LoginScreen({ onLogin }: { onLogin: (account: Account) => void }) {
+  const [username, setUsername] = useState("user");
+  const [password, setPassword] = useState("user123");
+  const [error, setError] = useState("");
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const matched = accounts.find((item) => item.username === username && item.password === password);
+    if (!matched) {
+      setError("用户名或密码错误");
+      return;
+    }
+    window.localStorage.setItem("xdrj-account", matched.username);
+    onLogin(matched);
+  }
+
+  return (
+    <main className="login-page">
+      <form className="login-panel" onSubmit={submit}>
+        <div className="login-mark">
+          <LockKeyhole size={26} />
+        </div>
+        <h1>4ga Boards 智能测试平台</h1>
+        <p>登录后进入测试场景生成与执行工作台</p>
+        <label>
+          <span>用户名</span>
+          <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
+        </label>
+        <label>
+          <span>密码</span>
+          <input
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            type="password"
+            autoComplete="current-password"
+          />
+        </label>
+        {error ? <div className="login-error">{error}</div> : null}
+        <button type="submit">登录</button>
+        <div className="account-hints">
+          {accounts.map((item) => (
+            <button
+              type="button"
+              key={item.username}
+              onClick={() => {
+                setUsername(item.username);
+                setPassword(item.password);
+                setError("");
+              }}
+            >
+              {item.role}
+            </button>
+          ))}
+        </div>
+      </form>
     </main>
   );
 }

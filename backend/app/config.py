@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://127.0.0.1:5173"
 
     docs_base_url: str = "https://docs.4gaboards.com/"
-    target_app_url: str = "http://127.0.0.1:3000"
+    target_app_url: str = "https://demo.4gaboards.com/"
     target_app_email: str = "demo"
     target_app_password: str = "demo"
     playwright_browser_executable: str | None = Field(
@@ -32,6 +32,9 @@ class Settings(BaseSettings):
 
     llm_provider: str = "auto"
     llm_timeout_seconds: int = 120
+    minimax_api_key: str | None = Field(default=None, validation_alias="MINIMAX_API_KEY")
+    minimax_base_url: str | None = Field(default=None, validation_alias="MINIMAX_BASE_URL")
+    minimax_model: str | None = Field(default=None, validation_alias="MINIMAX_MODEL")
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_base_url: str | None = Field(default=None, validation_alias="OPENAI_BASE_URL")
     openai_model: str | None = Field(default=None, validation_alias="OPENAI_MODEL")
@@ -81,17 +84,24 @@ def read_codex_provider() -> dict[str, str | None]:
 
 
 def get_settings() -> Settings:
-    load_dotenv(PROJECT_DIR / ".env", override=False)
+    load_dotenv(PROJECT_DIR / ".env", override=True)
     settings = Settings()
-    codex = read_codex_provider()
-    if not settings.openai_base_url and codex.get("base_url"):
-        settings.openai_base_url = codex["base_url"]
-    if not settings.openai_model and codex.get("model"):
-        settings.openai_model = codex["model"]
-    if not settings.openai_api_key and codex.get("api_key"):
-        settings.openai_api_key = codex["api_key"]
-    if os.getenv("DEEPSEEK_API_KEY") and not settings.openai_api_key:
-        settings.openai_api_key = os.getenv("DEEPSEEK_API_KEY")
-        settings.openai_base_url = settings.openai_base_url or "https://api.deepseek.com/v1"
-        settings.openai_model = settings.openai_model or "deepseek-chat"
+    provider = settings.llm_provider.lower()
+    if provider == "minimax" or settings.minimax_api_key:
+        settings.llm_provider = "minimax"
+        settings.openai_api_key = settings.minimax_api_key or settings.openai_api_key
+        settings.openai_base_url = settings.minimax_base_url or "https://api.minimaxi.com/v1"
+        settings.openai_model = settings.minimax_model or "MiniMax-M3"
+    else:
+        codex = read_codex_provider()
+        if not settings.openai_base_url and codex.get("base_url"):
+            settings.openai_base_url = codex["base_url"]
+        if not settings.openai_model and codex.get("model"):
+            settings.openai_model = codex["model"]
+        if not settings.openai_api_key and codex.get("api_key"):
+            settings.openai_api_key = codex["api_key"]
+        if os.getenv("DEEPSEEK_API_KEY") and not settings.openai_api_key:
+            settings.openai_api_key = os.getenv("DEEPSEEK_API_KEY")
+            settings.openai_base_url = settings.openai_base_url or "https://api.deepseek.com/v1"
+            settings.openai_model = settings.openai_model or "deepseek-chat"
     return settings

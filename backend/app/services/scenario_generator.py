@@ -112,15 +112,22 @@ class ScenarioGenerator:
         data = await self.llm.complete_json(
             system=(
                 "你是软件测试专家。只能根据给定文档证据识别功能点。"
-                "输出 JSON: {features:[{name,description,priority,entities,preconditions,source_ids}]}"
+                "输出 JSON: {features:[{name,description,priority,entities,preconditions,source_ids}]}。"
+                "除 source_ids 外，所有面向用户展示的字段必须使用简体中文。"
             ),
-            user=f"最多生成 {max_features} 个 4ga Boards 主要功能点，证据如下：\n{evidence}",
+            user=(
+                f"最多生成 {max_features} 个 4ga Boards 主要功能点。"
+                "文档证据可能是英文，但功能名、描述、实体、前置条件必须翻译/概括为简体中文。"
+                f"\n证据如下：\n{evidence}"
+            ),
             fallback=fallback,
         )
         raw_features = data.get("features", []) if isinstance(data, dict) else []
         refined: list[FeaturePoint] = []
         chunk_by_id = {chunk.id: chunk for chunk in chunks}
         for item in raw_features[:max_features]:
+            if not isinstance(item, dict):
+                continue
             source_ids = item.get("source_ids") or []
             refs = self._refs_from_chunks([chunk_by_id[sid] for sid in source_ids if sid in chunk_by_id], 3)
             if not refs:
@@ -133,12 +140,14 @@ class ScenarioGenerator:
                     name=str(item.get("name") or "未命名功能"),
                     description=str(item.get("description") or "从用户手册中抽取的功能点"),
                     priority=item.get("priority") if item.get("priority") in {"P0", "P1", "P2"} else "P1",
-                    entities=list(item.get("entities") or []),
-                    preconditions=list(item.get("preconditions") or ["已登录 4ga Boards"]),
+                    entities=self._string_list(item.get("entities")),
+                    preconditions=self._string_list(item.get("preconditions")) or ["已登录 4ga Boards"],
                     doc_refs=refs,
                 )
             )
-        return refined or features
+        if refined and self._feature_text_is_chinese(refined):
+            return refined
+        return features
 
     def _rule_scenarios(
         self,
@@ -198,11 +207,15 @@ class ScenarioGenerator:
         data = await self.llm.complete_json(
             system=(
                 "你是 Web 测试架构师。根据功能点生成可由浏览器智能体执行的测试场景。"
-                "输出 JSON: {scenarios:[{feature_id,title,difficulty,tags,steps,expectations,oracle}]}"
+                "输出 JSON: {scenarios:[{feature_id,title,difficulty,tags,steps,expectations,oracle}]}。"
+                "除 feature_id、difficulty、tags、target、value、CSS selector 外，所有面向用户展示的字段必须使用简体中文。"
+                "steps[].action 和 steps[].expectation 必须是中文动词短句，不要输出 navigate/click/type/assert 等英文动作名。"
             ),
             user=(
                 f"每个功能生成 {scenarios_per_feature} 个场景。步骤字段为 action,target,value,expectation。"
-                f"必须可执行，必须包含预期状态。\n功能点：{feature_payload}"
+                "必须可执行，必须包含预期状态。"
+                "即使证据是英文，也要把标题、步骤、预期状态和测试预言写成简体中文。"
+                f"\n功能点：{feature_payload}"
             ),
             fallback=fallback,
         )
@@ -210,29 +223,15 @@ class ScenarioGenerator:
         features_by_id = {feature.id: feature for feature in features}
         refined: list[TestScenario] = []
         for item in raw:
+            if not isinstance(item, dict):
+                continue
             feature = features_by_id.get(item.get("feature_id"))
             if not feature:
                 continue
-            steps = [
-                TestStep(
-                    index=i + 1,
-                    action=str(step.get("action") or "inspect"),
-                    target=step.get("target"),
-                    value=step.get("value"),
-                    expectation=step.get("expectation"),
-                )
-                for i, step in enumerate(item.get("steps") or [])
-            ]
+            steps = self._normalize_steps(item.get("steps"))
             if not steps:
                 continue
-            expectations = [
-                TestExpectation(
-                    description=str(exp.get("description") or exp),
-                    observable=str(exp.get("observable") or exp),
-                    severity=exp.get("severity") if isinstance(exp, dict) and exp.get("severity") in {"critical", "major", "minor"} else "major",
-                )
-                for exp in item.get("expectations", [])
-            ] or [
+            expectations = self._normalize_expectations(item.get("expectations")) or [
                 TestExpectation(
                     description="执行后应满足用户手册描述的功能状态",
                     observable=feature.doc_refs[0].snippet[:220],
@@ -246,14 +245,107 @@ class ScenarioGenerator:
                     difficulty=item.get("difficulty")
                     if item.get("difficulty") in {"simple", "medium", "hard"}
                     else "medium",
-                    tags=list(item.get("tags") or ["llm", "rag"]),
+                    tags=self._string_list(item.get("tags")) or ["llm", "rag"],
                     steps=steps,
                     expectations=expectations,
                     oracle=str(item.get("oracle") or "根据步骤轨迹和预期状态验证是否成功"),
                     evidence_refs=feature.doc_refs,
                 )
             )
-        return refined or scenarios
+        if (
+            refined
+            and self._scenario_text_is_chinese(refined)
+            and self._scenario_difficulty_is_balanced(features, refined, scenarios_per_feature)
+        ):
+            return refined
+        return scenarios
+
+    def _has_cjk(self, text: object) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", str(text)))
+
+    def _feature_text_is_chinese(self, features: list[FeaturePoint]) -> bool:
+        if not features:
+            return False
+        return all(self._has_cjk(feature.name) and self._has_cjk(feature.description) for feature in features)
+
+    def _scenario_text_is_chinese(self, scenarios: list[TestScenario]) -> bool:
+        if not scenarios:
+            return False
+        for scenario in scenarios:
+            if not self._has_cjk(scenario.title) or not self._has_cjk(scenario.oracle):
+                return False
+            if not all(self._has_cjk(step.action) for step in scenario.steps):
+                return False
+            expectations = [step.expectation for step in scenario.steps if step.expectation]
+            if expectations and not all(self._has_cjk(item) for item in expectations):
+                return False
+            if not all(self._has_cjk(item.description) for item in scenario.expectations):
+                return False
+        return True
+
+    def _scenario_difficulty_is_balanced(
+        self,
+        features: list[FeaturePoint],
+        scenarios: list[TestScenario],
+        scenarios_per_feature: int,
+    ) -> bool:
+        expected = ["simple", "medium", "hard"][: max(1, min(scenarios_per_feature, 3))]
+        for feature in features:
+            difficulties = {
+                scenario.difficulty
+                for scenario in scenarios
+                if scenario.feature_id == feature.id and not scenario.mutated_from
+            }
+            if not set(expected).issubset(difficulties):
+                return False
+        return True
+
+    def _string_list(self, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [str(item) for item in value if item is not None]
+        return [str(value)]
+
+    def _normalize_steps(self, value: object) -> list[TestStep]:
+        normalized: list[TestStep] = []
+        raw_steps = value if isinstance(value, list) else [value] if value else []
+        for index, step in enumerate(raw_steps, start=1):
+            if isinstance(step, dict):
+                normalized.append(
+                    TestStep(
+                        index=index,
+                        action=str(step.get("action") or "inspect"),
+                        target=str(step["target"]) if step.get("target") is not None else None,
+                        value=str(step["value"]) if step.get("value") is not None else None,
+                        expectation=str(step["expectation"])
+                        if step.get("expectation") is not None
+                        else None,
+                    )
+                )
+            else:
+                normalized.append(TestStep(index=index, action=str(step)))
+        return normalized
+
+    def _normalize_expectations(self, value: object) -> list[TestExpectation]:
+        normalized: list[TestExpectation] = []
+        raw_expectations = value if isinstance(value, list) else [value] if value else []
+        for expectation in raw_expectations:
+            if isinstance(expectation, dict):
+                severity = expectation.get("severity")
+                normalized.append(
+                    TestExpectation(
+                        description=str(expectation.get("description") or expectation),
+                        observable=str(expectation.get("observable") or expectation.get("description") or expectation),
+                        severity=severity if severity in {"critical", "major", "minor"} else "major",
+                    )
+                )
+            else:
+                text = str(expectation)
+                normalized.append(TestExpectation(description=text, observable=text))
+        return normalized
 
     def _refs_from_chunks(self, chunks: list[KnowledgeChunk], limit: int) -> list[DocRef]:
         refs: list[DocRef] = []
@@ -276,8 +368,19 @@ class ScenarioGenerator:
         return refs
 
     def _feature_description(self, name: str, refs: list[DocRef]) -> str:
-        snippet = re.sub(r"\s+", " ", refs[0].snippet)[:160] if refs else ""
-        return f"{name}功能来自用户手册证据：{snippet}"
+        source = self._localized_doc_title(refs[0].title) if refs else "用户手册"
+        return f"{name}功能来自{source}等用户手册证据，覆盖关键操作、结果状态和可验证页面表现。"
+
+    def _localized_doc_title(self, title: str) -> str:
+        mapping = {
+            "Getting Started": "入门说明",
+            "Projects": "项目说明",
+            "Boards": "看板说明",
+            "Cards": "卡片说明",
+            "List View": "列表视图说明",
+            "Import Export": "导入导出说明",
+        }
+        return mapping.get(title, title)
 
     def _pretty_name(self, text: str) -> str:
         text = re.sub(r"[-_]+", " ", text).strip()

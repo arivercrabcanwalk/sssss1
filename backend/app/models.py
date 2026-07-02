@@ -172,7 +172,15 @@ class GenerateRequest(BaseModel):
 class MutationRequest(BaseModel):
     mutation_types: list[
         Literal["boundary_input", "missing_required", "wrong_order", "mobile_layout", "duplicate_submit"]
-    ] = Field(default_factory=lambda: ["boundary_input", "missing_required", "mobile_layout"])
+    ] = Field(
+        default_factory=lambda: [
+            "boundary_input",
+            "missing_required",
+            "wrong_order",
+            "mobile_layout",
+            "duplicate_submit",
+        ]
+    )
 
 
 class AppState(BaseModel):

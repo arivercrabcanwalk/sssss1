@@ -1,4 +1,4 @@
-import { Activity, CheckCircle2, XCircle } from "lucide-react";
+import { Activity, CheckCircle2, Loader2, XCircle } from "lucide-react";
 import type { ExecutionRun } from "../api/types";
 
 type Props = {
@@ -7,6 +7,14 @@ type Props = {
 
 export function RunTimeline({ runs }: Props) {
   const latest = runs[0];
+  const statusIcon =
+    latest?.status === "running" || latest?.status === "pending" ? (
+      <Loader2 className="spin" size={20} />
+    ) : latest?.status === "passed" ? (
+      <CheckCircle2 size={20} />
+    ) : (
+      <XCircle size={20} />
+    );
   return (
     <section className="panel timeline-panel">
       <div className="panel-heading">
@@ -21,7 +29,7 @@ export function RunTimeline({ runs }: Props) {
       ) : (
         <div className="run-detail">
           <div className="run-summary">
-            {latest.status === "passed" ? <CheckCircle2 size={20} /> : <XCircle size={20} />}
+            {statusIcon}
             <strong>{latest.id}</strong>
             <span className={latest.status}>{latest.status}</span>
             <span>{latest.metrics.duration_seconds ?? 0}s</span>
@@ -30,6 +38,13 @@ export function RunTimeline({ runs }: Props) {
           <div className="verdict">
             {latest.failure_reason || latest.verdict?.failure_reason || "验证器未发现阻断性失败"}
           </div>
+          {latest.trace.length ? (
+            <div className="trace-list">
+              {latest.trace.slice(-6).map((item, index) => (
+                <span key={`${item}-${index}`}>{item}</span>
+              ))}
+            </div>
+          ) : null}
           <div className="timeline">
             {latest.actions.map((action) => (
               <div className={`timeline-row ${action.status}`} key={action.index}>
