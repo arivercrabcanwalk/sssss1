@@ -81,6 +81,23 @@ export type ExecutionRun = {
   };
 };
 
+export type LoginRequest = {
+  username: string;
+  password: string;
+};
+
+export type LoginResponse = {
+  access_token: string;
+  token_type: string;
+  username: string;
+  role: "普通用户" | "管理员";
+};
+
+export type UserInfo = {
+  username: string;
+  role: "普通用户" | "管理员";
+};
+
 export type Metrics = {
   coverage: {
     feature_count: number;

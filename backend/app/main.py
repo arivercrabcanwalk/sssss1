@@ -5,11 +5,20 @@ from pathlib import Path
 from uuid import uuid4
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.agent.executor import BrowserAgent
+from app.auth import (
+    LoginRequest,
+    User,
+    authenticate_user,
+    create_access_token,
+    get_current_user,
+    require_admin,
+    verify_ws_token,
+)
 from app.config import get_settings
 from app.models import (
     ActionStatus,
@@ -60,6 +69,25 @@ def save() -> None:
     store.save_state(state)
 
 
+@app.post("/api/auth/login")
+def auth_login(request: LoginRequest) -> dict:
+    user = authenticate_user(request.username, request.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    token = create_access_token(user)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "username": user.username,
+        "role": user.role,
+    }
+
+
+@app.get("/api/auth/me")
+def auth_me(current_user: User = Depends(get_current_user)) -> dict:
+    return {"username": current_user.username, "role": current_user.role}
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {
@@ -76,7 +104,7 @@ def health() -> dict:
 
 
 @app.post("/api/docs/crawl")
-async def crawl_docs(request: CrawlRequest) -> dict:
+async def crawl_docs(request: CrawlRequest, _user: User = Depends(require_admin)) -> dict:
     if state.docs and not request.refresh:
         return {"count": len(state.docs), "docs": state.docs, "cached": True}
     crawler = DocsCrawler(str(request.base_url or settings.docs_base_url))
@@ -93,7 +121,7 @@ async def crawl_docs(request: CrawlRequest) -> dict:
 
 
 @app.post("/api/knowledge/build")
-async def build_knowledge() -> dict:
+async def build_knowledge(_user: User = Depends(require_admin)) -> dict:
     if not state.docs:
         state.docs = fallback_docs()
     state.chunks = chunk_pages(state.docs)
@@ -104,7 +132,7 @@ async def build_knowledge() -> dict:
 
 
 @app.post("/api/scenarios/generate")
-async def generate_scenarios(request: GenerateRequest) -> dict:
+async def generate_scenarios(request: GenerateRequest, _user: User = Depends(require_admin)) -> dict:
     if not state.chunks:
         await build_knowledge()
     generator = ScenarioGenerator(retriever)
@@ -120,18 +148,18 @@ async def generate_scenarios(request: GenerateRequest) -> dict:
 
 
 @app.get("/api/features")
-def features() -> dict:
+def features(_user: User = Depends(get_current_user)) -> dict:
     return {"features": state.features}
 
 
 @app.get("/api/scenarios")
-def scenarios() -> dict:
+def scenarios(_user: User = Depends(get_current_user)) -> dict:
     return {"scenarios": state.scenarios}
 
 
 @app.get("/api/metrics")
-def metrics() -> dict:
-    runs = list(state.runs.values())
+def metrics(current_user: User = Depends(get_current_user)) -> dict:
+    runs = _visible_runs(current_user)
     pass_count = sum(1 for run in runs if run.status == ActionStatus.passed)
     durations = [run.metrics.duration_seconds for run in runs if run.metrics.duration_seconds]
     return {
@@ -144,7 +172,7 @@ def metrics() -> dict:
 
 
 @app.post("/api/scenarios/{scenario_id}/mutations")
-def mutate_scenario(scenario_id: str, request: MutationRequest) -> dict:
+def mutate_scenario(scenario_id: str, request: MutationRequest, _user: User = Depends(get_current_user)) -> dict:
     scenario = next((item for item in state.scenarios if item.id == scenario_id), None)
     if not scenario:
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -165,8 +193,16 @@ def mutate_scenario(scenario_id: str, request: MutationRequest) -> dict:
     }
 
 
+def _visible_runs(user: User) -> list[ExecutionRun]:
+    """Admin sees all runs; regular users see only their own."""
+    all_runs = list(state.runs.values())
+    if user.role == "管理员":
+        return all_runs
+    return [r for r in all_runs if r.created_by == user.username]
+
+
 @app.post("/api/runs")
-async def create_runs(request: RunRequest) -> dict:
+async def create_runs(request: RunRequest, current_user: User = Depends(get_current_user)) -> dict:
     if not state.scenarios:
         raise HTTPException(status_code=400, detail="Generate scenarios before executing runs")
     selected = (
@@ -183,6 +219,7 @@ async def create_runs(request: RunRequest) -> dict:
             run = ExecutionRun(
                 id=run_id,
                 scenario_id=scenario.id,
+                created_by=current_user.username,
                 status=ActionStatus.running,
                 target_url=str(request.target_url or settings.target_app_url),
                 trace=["执行任务已创建，等待浏览器启动"],
@@ -238,15 +275,26 @@ async def execute_run_task(
 
 
 @app.get("/api/runs/{run_id}")
-def get_run(run_id: str) -> dict:
+def get_run(run_id: str, current_user: User = Depends(get_current_user)) -> dict:
     run = state.runs.get(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    if current_user.role != "管理员" and run.created_by != current_user.username:
+        raise HTTPException(status_code=403, detail="无权查看此执行记录")
     return {"run": run}
 
 
 @app.websocket("/api/runs/{run_id}/events")
 async def run_events(websocket: WebSocket, run_id: str) -> None:
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=4001)
+        return
+    try:
+        verify_ws_token(token)
+    except HTTPException:
+        await websocket.close(code=4001)
+        return
     await websocket.accept()
     try:
         last_len = -1
@@ -267,24 +315,23 @@ async def run_events(websocket: WebSocket, run_id: str) -> None:
 
 
 @app.get("/api/reports/{report_id}")
-def get_report(report_id: str) -> FileResponse:
-    report_path = settings.reports_dir / f"{report_id}.html"
-    if not report_path.exists():
-        runs = list(state.runs.values())
-        paths = reporter.write_report(report_id, state.features, state.scenarios, runs)
-        report_path = Path(paths["html"])
+def get_report(report_id: str, current_user: User = Depends(get_current_user)) -> FileResponse:
+    # Always regenerate with current user's visible runs to avoid cross-user caching.
+    runs = _visible_runs(current_user)
+    paths = reporter.write_report(report_id, state.features, state.scenarios, runs)
+    report_path = Path(paths["html"])
     return FileResponse(report_path, media_type="text/html", filename=f"{report_id}.html")
 
 
 @app.post("/api/reports")
-def create_report() -> dict:
+def create_report(current_user: User = Depends(get_current_user)) -> dict:
     report_id = f"report_{uuid4().hex[:10]}"
-    paths = reporter.write_report(report_id, state.features, state.scenarios, list(state.runs.values()))
+    paths = reporter.write_report(report_id, state.features, state.scenarios, _visible_runs(current_user))
     return {"report_id": report_id, "paths": paths, "url": f"/api/reports/{report_id}"}
 
 
 @app.post("/api/reset")
-def reset_state() -> dict:
+def reset_state(_user: User = Depends(require_admin)) -> dict:
     state.docs = []
     state.chunks = []
     state.features = []

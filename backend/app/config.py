@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     openai_base_url: str | None = Field(default=None, validation_alias="OPENAI_BASE_URL")
     openai_model: str | None = Field(default=None, validation_alias="OPENAI_MODEL")
 
+    jwt_secret_key: str = Field(
+        default="change-me-in-production",
+        validation_alias="JWT_SECRET_KEY",
+    )
+    jwt_algorithm: str = "HS256"
+    jwt_expiration_minutes: int = Field(
+        default=1440,
+        validation_alias="JWT_EXPIRATION_MINUTES",
+    )
+
     data_dir: Path = PROJECT_DIR / "data"
 
     @property

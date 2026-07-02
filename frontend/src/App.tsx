@@ -12,7 +12,7 @@ import {
   Sparkles,
   UserRound
 } from "lucide-react";
-import { api } from "./api/client";
+import { api, clearToken, getToken, setToken } from "./api/client";
 import type { ExecutionRun, FeaturePoint, Metrics, TestScenario } from "./api/types";
 import { FeatureList } from "./components/FeatureList";
 import { RunTimeline } from "./components/RunTimeline";
@@ -26,19 +26,26 @@ type LogItem = {
 
 type Account = {
   username: string;
-  password: string;
   role: "普通用户" | "管理员";
 };
 
-const accounts: Account[] = [
-  { username: "user", password: "user123", role: "普通用户" },
-  { username: "admin", password: "admin123", role: "管理员" }
-];
-
 export function App() {
   const [account, setAccount] = useState<Account | null>(() => {
-    const saved = window.localStorage.getItem("xdrj-account");
-    return accounts.find((item) => item.username === saved) ?? null;
+    const token = getToken();
+    if (!token) return null;
+    try {
+      const payload: { sub: string; role: string; exp: number } = JSON.parse(
+        atob(token.split(".")[1])
+      );
+      if (payload.exp * 1000 < Date.now()) {
+        clearToken();
+        return null;
+      }
+      return { username: payload.sub, role: payload.role as Account["role"] };
+    } catch {
+      clearToken();
+      return null;
+    }
   });
   const [features, setFeatures] = useState<FeaturePoint[]>([]);
   const [scenarios, setScenarios] = useState<TestScenario[]>([]);
@@ -50,6 +57,7 @@ export function App() {
   const [busyLabel, setBusyLabel] = useState<string>();
   const [statusMessage, setStatusMessage] = useState("系统已就绪，可以按顶部按钮执行流水线");
   const [logs, setLogs] = useState<LogItem[]>([]);
+  const [refreshCrawl, setRefreshCrawl] = useState(false);
 
   const selectedScenario = useMemo(
     () => scenarios.find((scenario) => scenario.id === selectedScenarioId),
@@ -70,11 +78,18 @@ export function App() {
     setFeatures(featureData.features);
     setScenarios(scenarioData.scenarios);
     setMetrics(metricData);
-    if (!selectedFeatureId && featureData.features[0]) {
-      setSelectedFeatureId(featureData.features[0].id);
-    }
-    if (!selectedScenarioId && scenarioData.scenarios[0]) {
-      setSelectedScenarioId(scenarioData.scenarios[0].id);
+    if (featureData.features[0]) {
+      // Clear stale selection if current feature/scenario no longer exists
+      if (!featureData.features.some((f) => f.id === selectedFeatureId)) {
+        setSelectedFeatureId(featureData.features[0].id);
+        setSelectedScenarioId(undefined);
+      }
+      if (scenarioData.scenarios[0]) {
+        const exists = scenarioData.scenarios.some((s) => s.id === selectedScenarioId);
+        if (!exists) {
+          setSelectedScenarioId(scenarioData.scenarios[0].id);
+        }
+      }
     }
     if (showMessage) {
       log(
@@ -127,53 +142,72 @@ export function App() {
             <UserRound size={15} />
             {account.role}
           </span>
-          <button
-            disabled={busy}
-            onClick={() =>
-              guarded("抓取文档", async () => {
-                log("开始抓取 4ga Boards 用户手册");
-                const result = await api.crawl();
-                log(`抓取完成：${result.count} 个文档页面${result.cached ? "（使用缓存）" : ""}`);
-              })
-            }
-          >
-            {busyLabel === "抓取文档" ? <Loader2 className="spin" size={16} /> : <Globe size={16} />}
-            {busyLabel === "抓取文档" ? "抓取中" : "抓文档"}
-          </button>
-          <button
-            disabled={busy}
-            onClick={() =>
-              guarded("构建知识库", async () => {
-                log("开始构建 RAG 知识库");
-                const result = await api.buildKnowledge();
-                log(`知识库构建完成：${result.chunk_count} 个片段`);
-              })
-            }
-          >
-            {busyLabel === "构建知识库" ? <Loader2 className="spin" size={16} /> : <Database size={16} />}
-            {busyLabel === "构建知识库" ? "构建中" : "建知识库"}
-          </button>
-          <button
-            disabled={busy}
-            onClick={() =>
-              guarded("生成场景", async () => {
-                log("开始调用 MiniMax 生成结构化测试场景，复杂文档可能需要几分钟");
-                const result = await api.generate();
-                setFeatures(result.features);
-                setScenarios(result.scenarios);
-                log(`生成完成：${result.features.length} 个功能点，${result.scenarios.length} 个场景`);
-              })
-            }
-          >
-            {busyLabel === "生成场景" ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
-            {busyLabel === "生成场景" ? "生成中" : "生成场景"}
-          </button>
+          {account.role === "管理员" && (
+            <button
+              disabled={busy}
+              onClick={() =>
+                guarded("抓取文档", async () => {
+                  log(refreshCrawl ? "开始强制重新抓取 4ga Boards 用户手册" : "开始抓取 4ga Boards 用户手册");
+                  const result = await api.crawl(refreshCrawl);
+                  log(`抓取完成：${result.count} 个文档页面${result.cached ? "（使用缓存）" : "（已重新抓取）"}`);
+                })
+              }
+            >
+              {busyLabel === "抓取文档" ? <Loader2 className="spin" size={16} /> : <Globe size={16} />}
+              {busyLabel === "抓取文档" ? "抓取中" : "抓文档"}
+            </button>
+          )}
+          {account.role === "管理员" && (
+            <label className="crawl-refresh-toggle" title="勾选后忽略缓存，强制从官网重新抓取">
+              <input
+                type="checkbox"
+                checked={refreshCrawl}
+                onChange={(event) => setRefreshCrawl(event.target.checked)}
+              />
+              <span>强制刷新</span>
+            </label>
+          )}
+          {account.role === "管理员" && (
+            <button
+              disabled={busy}
+              onClick={() =>
+                guarded("构建知识库", async () => {
+                  log("开始构建 RAG 知识库");
+                  const result = await api.buildKnowledge();
+                  log(`知识库构建完成：${result.chunk_count} 个片段`);
+                })
+              }
+            >
+              {busyLabel === "构建知识库" ? <Loader2 className="spin" size={16} /> : <Database size={16} />}
+              {busyLabel === "构建知识库" ? "构建中" : "建知识库"}
+            </button>
+          )}
+          {account.role === "管理员" && (
+            <button
+              disabled={busy}
+              onClick={() =>
+                guarded("生成场景", async () => {
+                  log("开始调用 MiniMax 生成结构化测试场景，复杂文档可能需要几分钟");
+                  const result = await api.generate();
+                  setFeatures(result.features);
+                  setScenarios(result.scenarios);
+                  log(`生成完成：${result.features.length} 个功能点，${result.scenarios.length} 个场景`);
+                })
+              }
+            >
+              {busyLabel === "生成场景" ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
+              {busyLabel === "生成场景" ? "生成中" : "生成场景"}
+            </button>
+          )}
           <button
             disabled={busy}
             onClick={() =>
               guarded("生成报告", async () => {
                 const result = await api.report();
-                window.open(result.url, "_blank", "noopener,noreferrer");
+                const html = await api.fetchReportHtml(result.url);
+                const blob = new Blob([html], { type: "text/html" });
+                const blobUrl = URL.createObjectURL(blob);
+                window.open(blobUrl, "_blank", "noopener,noreferrer");
                 log(`报告已生成：${result.report_id}`);
               })
             }
@@ -188,7 +222,7 @@ export function App() {
             title="退出登录"
             disabled={busy}
             onClick={() => {
-              window.localStorage.removeItem("xdrj-account");
+              clearToken();
               setAccount(null);
               setRuns([]);
               log("已退出登录");
@@ -318,20 +352,30 @@ export function App() {
   );
 }
 
+const hints = [
+  { username: "user", password: "user123", role: "普通用户" },
+  { username: "admin", password: "admin123", role: "管理员" },
+];
+
 function LoginScreen({ onLogin }: { onLogin: (account: Account) => void }) {
   const [username, setUsername] = useState("user");
   const [password, setPassword] = useState("user123");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const matched = accounts.find((item) => item.username === username && item.password === password);
-    if (!matched) {
-      setError("用户名或密码错误");
-      return;
+    setSubmitting(true);
+    setError("");
+    try {
+      const result = await api.login(username, password);
+      setToken(result.access_token);
+      onLogin({ username: result.username, role: result.role });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "登录失败");
+    } finally {
+      setSubmitting(false);
     }
-    window.localStorage.setItem("xdrj-account", matched.username);
-    onLogin(matched);
   }
 
   return (
@@ -356,9 +400,11 @@ function LoginScreen({ onLogin }: { onLogin: (account: Account) => void }) {
           />
         </label>
         {error ? <div className="login-error">{error}</div> : null}
-        <button type="submit">登录</button>
+        <button type="submit" disabled={submitting}>
+          {submitting ? "登录中..." : "登录"}
+        </button>
         <div className="account-hints">
-          {accounts.map((item) => (
+          {hints.map((item) => (
             <button
               type="button"
               key={item.username}

@@ -1,4 +1,18 @@
-import type { ExecutionRun, FeaturePoint, Metrics, TestScenario } from "./types";
+import type { ExecutionRun, FeaturePoint, LoginResponse, Metrics, TestScenario, UserInfo } from "./types";
+
+const TOKEN_KEY = "xdrj-token";
+
+export function getToken(): string | null {
+  return window.localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string): void {
+  window.localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken(): void {
+  window.localStorage.removeItem(TOKEN_KEY);
+}
 
 const jsonHeaders = { "Content-Type": "application/json" };
 
@@ -27,9 +41,17 @@ async function request<T>(url: string, options?: RequestInit & { timeoutMs?: num
   const timeoutMs = options?.timeoutMs ?? 30000;
   const controller = timeoutMs > 0 ? new AbortController() : undefined;
   const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : undefined;
-  const { timeoutMs: _timeoutMs, signal, ...fetchOptions } = options ?? {};
+  const { timeoutMs: _timeoutMs, signal, headers: optHeaders, ...fetchOptions } = options ?? {};
+
+  const headers: Record<string, string> = { ...(optHeaders as Record<string, string> || {}) };
+  const token = getToken();
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   const response = await fetch(apiUrl(url), {
     ...fetchOptions,
+    headers,
     signal: signal ?? controller?.signal
   })
     .catch((error) => {
@@ -44,6 +66,11 @@ async function request<T>(url: string, options?: RequestInit & { timeoutMs?: num
       }
     });
   if (!response.ok) {
+    if (response.status === 401 && !url.includes("/api/auth/login")) {
+      clearToken();
+      window.location.reload();
+      throw new Error("登录已过期，请重新登录");
+    }
     const text = await response.text();
     throw new Error(text || response.statusText);
   }
@@ -53,7 +80,11 @@ async function request<T>(url: string, options?: RequestInit & { timeoutMs?: num
 async function pollRun(runId: string, onRun: (run: ExecutionRun) => void): Promise<ExecutionRun> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 300000) {
-    const { run } = await request<{ run: ExecutionRun }>(`/api/runs/${runId}`, { timeoutMs: 15000 });
+    const data = await request<{ run: ExecutionRun }>(`/api/runs/${runId}`, { timeoutMs: 15000 });
+    const run = data?.run;
+    if (!run) {
+      throw new Error("后端返回的执行数据异常");
+    }
     onRun(run);
     if (run.status === "passed" || run.status === "failed") {
       return run;
@@ -65,11 +96,18 @@ async function pollRun(runId: string, onRun: (run: ExecutionRun) => void): Promi
 
 export const api = {
   health: () => request<Record<string, unknown>>("/api/health"),
-  crawl: () =>
+  login: (username: string, password: string) =>
+    request<LoginResponse>("/api/auth/login", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ username, password }),
+    }),
+  me: () => request<UserInfo>("/api/auth/me"),
+  crawl: (refresh = false) =>
     request<{ count: number; cached: boolean }>("/api/docs/crawl", {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ refresh: false, max_pages: 120 })
+      body: JSON.stringify({ refresh, max_pages: 120 })
     }),
   buildKnowledge: () =>
     request<{ chunk_count: number }>("/api/knowledge/build", {
@@ -81,7 +119,7 @@ export const api = {
       {
         method: "POST",
         headers: jsonHeaders,
-        body: JSON.stringify({ max_features: 6, scenarios_per_feature: 3, use_llm: true }),
+        body: JSON.stringify({ max_features: 12, scenarios_per_feature: 3, use_llm: true }),
         timeoutMs: 0
       }
     ),
@@ -109,7 +147,10 @@ export const api = {
   subscribeRun: (runId: string, onRun: (run: ExecutionRun) => void) =>
     new Promise<ExecutionRun>((resolve, reject) => {
       let settled = false;
-      const socket = new WebSocket(wsUrl(`/api/runs/${runId}/events`));
+      const token = getToken();
+      const socket = new WebSocket(
+        `${wsUrl(`/api/runs/${runId}/events`)}?token=${encodeURIComponent(token ?? "")}`
+      );
       socket.onmessage = (event) => {
         const payload = JSON.parse(event.data) as
           | { type: "trace" | "done"; run: ExecutionRun }
@@ -136,5 +177,17 @@ export const api = {
   report: () =>
     request<{ report_id: string; url: string; paths: Record<string, string> }>("/api/reports", {
       method: "POST"
-    })
+    }),
+  fetchReportHtml: async (url: string): Promise<string> => {
+    const headers: Record<string, string> = {};
+    const token = getToken();
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    const response = await fetch(apiUrl(url), { headers });
+    if (!response.ok) {
+      throw new Error("获取报告失败");
+    }
+    return response.text();
+  }
 };

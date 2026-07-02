@@ -131,6 +131,7 @@ class ExecutionMetrics(BaseModel):
 class ExecutionRun(BaseModel):
     id: str
     scenario_id: str
+    created_by: str = ""
     status: ActionStatus = ActionStatus.pending
     target_url: str
     plan: list[AgentAction] = Field(default_factory=list)

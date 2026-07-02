@@ -116,22 +116,29 @@ class BrowserAgent:
         run.metrics.screenshot_count = sum(1 for action in run.actions if action.screenshot_path)
 
     async def _launch_browser(self, pw, headless: bool):
-        try:
-            return await pw.chromium.launch(headless=headless)
-        except PlaywrightError as bundled_error:
-            for executable in self._browser_executable_candidates():
-                try:
-                    return await pw.chromium.launch(
-                        executable_path=str(executable),
-                        headless=headless,
-                        args=["--disable-gpu", "--no-first-run", "--no-default-browser-check"],
-                    )
-                except PlaywrightError:
-                    continue
-            raise RuntimeError(
-                "Playwright bundled Chromium is missing and no usable system Chrome/Edge was found. "
-                "Run `python -m playwright install chromium` or set PLAYWRIGHT_BROWSER_EXECUTABLE."
-            ) from bundled_error
+        # Skip bundled Chromium (not installed) — go directly to system browsers.
+        last_error = "no browser found"
+        for executable in self._browser_executable_candidates():
+            try:
+                return await pw.chromium.launch(
+                    executable_path=str(executable),
+                    headless=headless,
+                    args=[
+                        "--disable-gpu",
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ],
+                )
+            except Exception as exc:
+                last_error = f"{executable}: {exc}"
+                continue
+        raise RuntimeError(
+            f"无法启动浏览器。已尝试 {len(self._browser_executable_candidates())} 个候选路径。"
+            f"最后的错误: {last_error}。"
+            f"请运行 `python -m playwright install chromium` 或设置 PLAYWRIGHT_BROWSER_EXECUTABLE。"
+        )
 
     def _browser_executable_candidates(self) -> list[Path]:
         configured = self.settings.playwright_browser_executable
@@ -196,6 +203,8 @@ class BrowserAgent:
                     await page.wait_for_timeout(500)
                     action.observation = f"Clicked {action.selector or 'first available control'}"
                 else:
+                    action.status = ActionStatus.failed
+                    action.error = f"未找到可点击控件: {action.selector}"
                     action.observation = f"未找到可点击控件，按场景意图继续: {action.thought}"
             elif action.tool == "fill":
                 locator = await self._locator(
@@ -208,8 +217,12 @@ class BrowserAgent:
                         await locator.fill(action.value or "")
                         action.observation = f"Filled {action.selector or 'first editable field'}"
                     except PlaywrightError:
+                        action.status = ActionStatus.failed
+                        action.error = "目标控件不可编辑"
                         action.observation = f"目标控件不可编辑，按场景意图记录输入: {action.value or ''}"
                 else:
+                    action.status = ActionStatus.failed
+                    action.error = f"未找到可编辑控件: {action.selector}"
                     action.observation = f"未找到可编辑控件，按场景意图记录输入: {action.value or ''}"
             elif action.tool == "press":
                 await page.keyboard.press(action.value or "Enter")
@@ -261,19 +274,43 @@ class BrowserAgent:
             return None
 
     async def _ensure_logged_in(self, page) -> str | None:
-        if "/login" not in page.url:
-            return None
+        # Wait for the React SPA to render the login form (headless can be slow).
+        await page.wait_for_timeout(3000)
+
         email = page.locator("input[name='emailOrUsername']").first
-        password = page.locator("input[name='password']").first
-        login_button = page.locator("button[title='Log in'], button:has-text('Log in')").first
+        pwd = page.locator("input[name='password']").first
+        login_btn = page.locator("button[type='submit']").first
+
         try:
-            await email.wait_for(state="visible", timeout=4000)
+            await email.wait_for(state="visible", timeout=8000)
+        except PlaywrightError:
+            # maybe the site uses a different login flow
+            if "/login" not in page.url:
+                return None
+            return "detected /login in URL but email field not found"
+
+        try:
+            await pwd.wait_for(state="visible", timeout=2000)
+        except PlaywrightError:
+            return None
+
+        try:
+            await login_btn.wait_for(state="visible", timeout=2000)
+        except PlaywrightError:
+            return None
+
+        try:
             await email.fill(self.settings.target_app_email)
-            await password.fill(self.settings.target_app_password)
-            await login_button.click()
+            await pwd.fill(self.settings.target_app_password)
+            await login_btn.click()
+            # Wait until we leave the login page (up to 15s)
+            await page.wait_for_url(
+                lambda url: "/login" not in url,
+                timeout=15000,
+            )
             await page.wait_for_load_state("networkidle")
-            await page.wait_for_timeout(800)
-            return f"auto-login attempted as {self.settings.target_app_email}"
+            await page.wait_for_timeout(500)
+            return f"auto-login succeeded as {self.settings.target_app_email}"
         except PlaywrightError as exc:
             return f"auto-login failed: {str(exc)[:220]}"
 

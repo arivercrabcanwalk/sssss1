@@ -10,11 +10,7 @@ vendor/
 .env
 .env.*
 !.env.example
-data/raw/
-data/index/
-data/runs/
-data/reports/
-data/state.json
+data/
 frontend/.vite/
 playwright-report/
 test-results/

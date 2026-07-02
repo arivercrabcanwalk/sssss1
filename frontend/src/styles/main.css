@@ -183,6 +183,23 @@ main {
   box-shadow: 0 1px 2px rgba(31, 94, 255, 0.18);
 }
 
+.crawl-refresh-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  font-size: 12px;
+  color: #66758d;
+  cursor: pointer;
+  user-select: none;
+}
+
+.crawl-refresh-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: #1f5eff;
+}
+
 .top-actions button[title="刷新"],
 .top-actions button[title="退出登录"] {
   width: 36px;
